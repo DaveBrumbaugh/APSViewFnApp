@@ -1,0 +1,233 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <link rel="icon" type="image/x-icon" href="https://cdn.autodesk.io/favicon.ico">
+    <link rel="stylesheet" href="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/style.css">
+    <title>Autodesk Platform Services: Dave's Simple Viewer</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            font-family: ArtifaktElement;
+        }
+
+        #header, #preview, #overlay {
+            position: absolute;
+            width: 100%;
+        }
+
+        #header {
+            height: 3em;
+            display: flex;
+            flex-flow: row nowrap;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        #preview, #overlay {
+            top: 3em;
+            bottom: 0;
+        }
+
+        #overlay {
+            z-index: 1;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 1em;
+            display: none;
+        }
+
+            #overlay > .notification {
+                margin: auto;
+                padding: 1em;
+                max-width: 50%;
+                background: white;
+            }
+
+        #header > * {
+            height: 2em;
+            margin: 0 0.5em;
+            font-size: 1em;
+            font-family: ArtifaktElement;
+        }
+
+        #header .title {
+            flex: 1 0 auto;
+            height: auto;
+        }
+
+        #models {
+            flex: 0 1 auto;
+            min-width: 2em;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="header">
+        <img class="logo" src="https://cdn.autodesk.io/logo/black/stacked.png" alt="Autodesk Platform Services">
+        <span class="title">Dave's Simple Viewer</span>
+        <select name="models" id="models"></select>
+        <button id="upload" title="Upload New Model">Upload</button>
+        <input style="display: none" type="file" id="input">
+    </div>
+    <div id="preview"></div>
+    <div id="overlay"></div>
+    <script src="https://developer.api.autodesk.com/modelderivative/v2/viewers/7.*/viewer3D.js"></script>
+    <script>
+        initViewer(document.getElementById('preview')).then(viewer => {
+            const urn = window.location.hash?.substring(1);
+            setupModelSelection(viewer, urn);
+            setupModelUpload(viewer);
+        });
+
+        async function setupModelSelection(viewer, selectedUrn) {
+            const dropdown = document.getElementById('models');
+            dropdown.innerHTML = '';
+            try {
+                const resp = await fetch('/api/models');
+                if (!resp.ok) {
+                    throw new Error(await resp.text());
+                }
+                const models = await resp.json();
+                dropdown.innerHTML = models.map(model => `<option value=${model.urn} ${model.urn === selectedUrn ? 'selected' : ''}>${model.name}</option>`).join('\n');
+                dropdown.onchange = () => onModelSelected(viewer, dropdown.value);
+                if (dropdown.value) {
+                    onModelSelected(viewer, dropdown.value);
+                }
+            } catch (err) {
+                alert('Could not list models. See the console for more details.');
+                console.error(err);
+            }
+        }
+
+        async function setupModelUpload(viewer) {
+            const upload = document.getElementById('upload');
+            const input = document.getElementById('input');
+            const models = document.getElementById('models');
+            upload.onclick = () => input.click();
+            input.onchange = async () => {
+                const file = input.files[0];
+                let data = new FormData();
+                data.append('model-file', file);
+                if (file.name.endsWith('.zip')) { // When uploading a zip file, ask for the main design file in the archive
+                    const entrypoint = window.prompt('Please enter the filename of the main design inside the archive.');
+                    data.append('model-zip-entrypoint', entrypoint);
+                }
+                upload.setAttribute('disabled', 'true');
+                models.setAttribute('disabled', 'true');
+                showNotification(`Uploading model <em>${file.name}</em>. Do not reload the page.`);
+                try {
+                    const resp = await fetch('/api/modelspost', { method: 'POST', body: data });
+                    if (!resp.ok) {
+                        throw new Error(await resp.text());
+                    }
+                    const model = await resp.json();
+                    setupModelSelection(viewer, model.urn);
+                } catch (err) {
+                    alert(`Could not upload model ${file.name}. See the console for more details.`);
+                    console.error(err);
+                } finally {
+                    clearNotification();
+                    upload.removeAttribute('disabled');
+                    models.removeAttribute('disabled');
+                    input.value = '';
+                }
+            };
+        }
+
+        async function onModelSelected(viewer, urn) {
+            if (window.onModelSelectedTimeout) {
+                clearTimeout(window.onModelSelectedTimeout);
+                delete window.onModelSelectedTimeout;
+            }
+            window.location.hash = urn;
+            try {
+                const resp = await fetch(`/api/modelstatus?urn=${urn}`);
+                if (!resp.ok) {
+                    throw new Error(await resp.text());
+                }
+                const status = await resp.json();
+                switch (status.status) {
+                    case 'n/a':
+                        showNotification(`Model has not been translated.`);
+                        break;
+                    case 'inprogress':
+                        showNotification(`Model is being translated (${status.progress})...`);
+                        window.onModelSelectedTimeout = setTimeout(onModelSelected, 5000, viewer, urn);
+                        break;
+                    case 'failed':
+                        showNotification(`Translation failed. <ul>${status.messages.map(msg => `<li>${JSON.stringify(msg)}</li>`).join('')}</ul>`);
+                        break;
+                    default:
+                        clearNotification();
+                        loadModel(viewer, urn);
+                        break;
+                }
+            } catch (err) {
+                alert('Could not load model. See the console for more details.');
+                console.error(err);
+            }
+        }
+
+        function showNotification(message) {
+            const overlay = document.getElementById('overlay');
+            overlay.innerHTML = `<div class="notification">${message}</div>`;
+            overlay.style.display = 'flex';
+        }
+
+        function clearNotification() {
+            const overlay = document.getElementById('overlay');
+            overlay.innerHTML = '';
+            overlay.style.display = 'none';
+        }
+
+        async function getAccessToken(callback) {
+            try {
+                const resp = await fetch('/api/auth/token');
+                if (!resp.ok) {
+                    throw new Error(await resp.text());
+                }
+                const { access_token, expires_in } = await resp.json();
+                callback(access_token, expires_in);
+            } catch (err) {
+                alert('Could not obtain access token. See the console for more details.');
+                console.error(err);
+            }
+        }
+
+        function initViewer(container) {
+            return new Promise(function (resolve, reject) {
+                Autodesk.Viewing.Initializer({ getAccessToken }, function () {
+                    const config = {
+                        extensions: ['Autodesk.DocumentBrowser']
+                    };
+                    const viewer = new Autodesk.Viewing.GuiViewer3D(container, config);
+                    viewer.start();
+                    viewer.setTheme('light-theme');
+                    resolve(viewer);
+                });
+            });
+        }
+
+        function loadModel(viewer, urn) {
+            return new Promise(function (resolve, reject) {
+                function onDocumentLoadSuccess(doc) {
+                    resolve(viewer.loadDocumentNode(doc, doc.getRoot().getDefaultGeometry()));
+                }
+                function onDocumentLoadFailure(code, message, errors) {
+                    reject({ code, message, errors });
+                }
+                viewer.setLightPreset(0);
+                Autodesk.Viewing.Document.load('urn:' + urn, onDocumentLoadSuccess, onDocumentLoadFailure);
+            });
+        }
+
+    </script>
+</body>
+
+</html>
